@@ -1,0 +1,19 @@
+{
+  "name": "nepse-ai-analyzer",
+  "version": "1.0.0",
+  "description": "NEPSE Nepal Stock Exchange AI Market Analyzer",
+  "main": "server.js",
+  "scripts": {
+    "start": "node server.js",
+    "dev": "node server.js",
+    "test": "node scripts/security-smoke.js && node scripts/validate-fix.js"
+  },
+  "dependencies": {
+    "@rumess/nepse-api": "^1.0.5",
+    "express": "^4.18.3",
+    "node-cache": "^5.1.2"
+  },
+  "devDependencies": {
+    "cheerio": "^1.0.0"
+  }
+}
