@@ -16,6 +16,7 @@ const State = {
   nepseIndex: { value: 0, change: 0, pct: 0 },
   liveDataActive: false,
   lastLiveUpdate: null,
+  liveFetchInProgress: false,
   chartRange: 7,
   activeTab: 'dashboard',
   // BUG FIX: guard against corrupt localStorage — a JSON.parse throw here
@@ -177,43 +178,48 @@ function tickClock() {
 // LIVE DATA FETCHING
 // ════════════════════════════════════════════════════════════════════════════
 async function fetchLiveData() {
+  if (State.liveFetchInProgress) return;
+  State.liveFetchInProgress = true;
   try {
-    const res = await fetch('/api/market-status');
-    const data = await res.json();
-    if (data.success && data.data.live) {
-      const live = data.data.live;
-      // Try to extract NEPSE index from live data
-      if (live.nepseIndex !== undefined) {
-        updateNepseIndex(live.nepseIndex, live.change || 0);
-      } else if (Array.isArray(live) && live[0]) {
-        updateNepseIndex(live[0].currentValue || live[0].index, live[0].change || 0);
+    try {
+      const res = await fetch('/api/market-status');
+      const data = await res.json();
+      if (data.success && data.data.live) {
+        const live = data.data.live;
+        if (live.nepseIndex !== undefined) {
+          updateNepseIndex(live.nepseIndex, live.change || 0);
+        } else if (Array.isArray(live) && live[0]) {
+          updateNepseIndex(live[0].currentValue || live[0].index, live[0].change || 0);
+        }
       }
+    } catch (e) {
+      // Keep the latest displayed index when the upstream feed is unreachable.
     }
-  } catch (e) {
-    // Silent — use simulated data
-  }
 
-  try {
-    const res = await fetch('/api/stocks');
-    const data = await res.json();
-    if (data.success && data.data && data.source === 'live') {
-      mergeWithLiveData(data.data);
-      State.lastLiveUpdate = data.updatedAt || new Date().toISOString();
-      State.stocks.forEach(stock => {
-        stock.change = stock.ltp - stock.prevClose;
-        stock.changePct = stock.prevClose ? stock.change / stock.prevClose * 100 : 0;
-      });
-      renderNepseIndex();
-      updateTableRows();
-      renderTopMovers();
-      renderSectorHeatmap();
-      checkPriceAlerts();
-      setDataSourceBadge(true);
-    } else {
+    try {
+      const res = await fetch('/api/stocks');
+      const data = await res.json();
+      if (data.success && data.data && ['live', 'stale'].includes(data.source)) {
+        mergeWithLiveData(data.data);
+        State.lastLiveUpdate = data.updatedAt || State.lastLiveUpdate;
+        State.stocks.forEach(stock => {
+          stock.change = stock.ltp - stock.prevClose;
+          stock.changePct = stock.prevClose ? stock.change / stock.prevClose * 100 : 0;
+        });
+        renderNepseIndex();
+        updateTableRows();
+        renderTopMovers();
+        renderSectorHeatmap();
+        checkPriceAlerts();
+        setDataSourceBadge(data.source === 'live');
+      } else {
+        setDataSourceBadge(false);
+      }
+    } catch (e) {
       setDataSourceBadge(false);
     }
-  } catch (e) {
-    setDataSourceBadge(false);
+  } finally {
+    State.liveFetchInProgress = false;
   }
 }
 

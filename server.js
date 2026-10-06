@@ -15,6 +15,8 @@ const app = express();
 // Refresh the intraday feed frequently enough for a live tracker while
 // keeping one upstream request shared by all browser clients for each window.
 const LIVE_MARKET_CACHE_SECONDS = 5;
+const LIVE_MARKET_STALE_SECONDS = 10 * 60;
+const UPSTREAM_TIMEOUT_MS = 12_000;
 const cache = new NodeCache({ stdTTL: 60, checkperiod: 10, maxKeys: 1000 });
 
 app.disable('x-powered-by');
@@ -81,6 +83,11 @@ async function getNepseClient() {
   if (nepseClient) return nepseClient;
   try {
     nepseClient = new Nepse();
+    // The library defaults to 100 seconds, which can leave every browser
+    // refresh waiting on a socket that is no longer responding.
+    if (nepseClient.client?.defaults) {
+      nepseClient.client.defaults.timeout = UPSTREAM_TIMEOUT_MS;
+    }
     // Keep the library's default certificate verification enabled. Disabling
     // it would allow a network attacker to spoof the market-data endpoint.
     return nepseClient;
@@ -154,17 +161,32 @@ async function fetchTopLosers() {
   }
 }
 
+let liveMarketFetchInFlight = null;
+
 async function fetchLiveMarket() {
+  if (!liveMarketFetchInFlight) {
+    liveMarketFetchInFlight = fetchLiveMarketOnce().finally(() => {
+      liveMarketFetchInFlight = null;
+    });
+  }
+  return liveMarketFetchInFlight;
+}
+
+async function fetchLiveMarketOnce() {
   const key = 'live_market';
   const cached = cache.get(key);
   if (cached) return cached;
 
   try {
     const client = await getNepseClient();
-    if (!client) return null;
+    if (!client) return cache.get('live_market_stale') || null;
 
-    // BUG FIX: method is getLiveMarket() (getTodayPrice does not exist)
-    let data = await client.getLiveMarket();
+    let data = null;
+    try {
+      data = await client.getLiveMarket();
+    } catch (e) {
+      console.warn('NEPSE live-market endpoint unavailable; trying today-price feed:', e.message);
+    }
 
     // BUG FIX: after market close the intraday feed returns an empty array
     // and /api/stocks used to degrade to simulated data for the rest of the
@@ -196,11 +218,13 @@ async function fetchLiveMarket() {
     if (data) {
       cache.set(key, data, LIVE_MARKET_CACHE_SECONDS);
       cache.set('live_market_updated_at', new Date().toISOString(), LIVE_MARKET_CACHE_SECONDS);
+      cache.set('live_market_stale', data, LIVE_MARKET_STALE_SECONDS);
+      cache.set('live_market_stale_updated_at', new Date().toISOString(), LIVE_MARKET_STALE_SECONDS);
     }
-    return data;
+    return data || cache.get('live_market_stale') || null;
   } catch (e) {
     console.error('Live market fetch failed:', e.message);
-    return null;
+    return cache.get('live_market_stale') || null;
   }
 }
 
@@ -306,8 +330,8 @@ app.get('/api/stocks', async (req, res) => {
       return res.json({
         success: true,
         data: stocks,
-        source: 'live',
-        updatedAt: cache.get('live_market_updated_at') || new Date().toISOString()
+        source: cache.has('live_market_updated_at') ? 'live' : 'stale',
+        updatedAt: cache.get('live_market_updated_at') || cache.get('live_market_stale_updated_at') || null
       });
     }
     res.json({ success: false, data: null, source: 'unavailable', error: 'Live data unavailable' });
