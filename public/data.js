@@ -87,7 +87,9 @@ function generateNepseHistory(days) {
     const change = (Math.random() - 0.46) * 42; // slight upward bias
     base = Math.max(1800, Math.min(2800, base + change));
     history.push({
-      date: d.toISOString().split('T')[0],
+      // Format from the local Date, not toISOString(): the weekend check above
+      // uses local getDay(), so a UTC label could shift the date by one day.
+      date: `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`,
       value: Math.round(base * 100) / 100,
       volume: Math.floor(Math.random() * 800000000) + 200000000,
       turnover: Math.floor(Math.random() * 6000000000) + 1000000000

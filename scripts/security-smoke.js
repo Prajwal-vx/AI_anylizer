@@ -16,4 +16,12 @@ assert.match(server, /Retry-After/);
 assert.match(server, /\^\[A-Z0-9\.\-\]\{1,12\}\$/);
 assert.doesNotMatch(server, /app\.use\(cors\(/);
 
+// Behaviour guards added in the hacker-audit pass
+assert.match(server, /nepseIndex/);                      // normalized NEPSE index, not live[0]
+assert.match(server, /status\(404\)/);                   // unknown /api/* answers JSON 404
+assert.match(server, /setTLSVerification\(true\)/);      // upstream TLS verification enabled
+assert.match(server, /\+05:45/);                         // NPT timestamp carries the real offset
+assert.match(server, /server\.on\('error'/);             // friendly EADDRINUSE handling
+
 console.log('PASS security configuration guards (headers, body size, API rate limit, cache bound, symbol validation, no open CORS)');
+console.log('PASS behaviour guards (NEPSE index shape, API JSON 404, TLS verification, NPT offset, port-in-use handling)');

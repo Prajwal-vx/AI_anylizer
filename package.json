@@ -6,7 +6,9 @@
   "scripts": {
     "start": "node server.js",
     "dev": "node server.js",
-    "test": "node scripts/security-smoke.js && node scripts/validate-fix.js"
+    "audit": "node scripts/audit.js",
+    "smoke": "node scripts/smoke.js",
+    "test": "node scripts/audit.js && node scripts/security-smoke.js && node scripts/validate-fix.js && node scripts/smoke.js"
   },
   "dependencies": {
     "@rumess/nepse-api": "^1.0.5",

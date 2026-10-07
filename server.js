@@ -82,19 +82,38 @@ async function getNepseClient() {
   if (!Nepse) return null;
   if (nepseClient) return nepseClient;
   try {
-    nepseClient = new Nepse();
+    const client = new Nepse();
+    // The library defaults to tlsVerify = false (rejectUnauthorized: false),
+    // which lets a network attacker spoof the market-data endpoint. Turn
+    // certificate verification back on — nepalstock.com.np presents a valid
+    // certificate. Must run before the timeout tweak because it rebuilds
+    // the underlying axios instance.
+    if (typeof client.setTLSVerification === 'function') {
+      client.setTLSVerification(true);
+    }
     // The library defaults to 100 seconds, which can leave every browser
     // refresh waiting on a socket that is no longer responding.
-    if (nepseClient.client?.defaults) {
-      nepseClient.client.defaults.timeout = UPSTREAM_TIMEOUT_MS;
+    if (client.client?.defaults) {
+      client.client.defaults.timeout = UPSTREAM_TIMEOUT_MS;
     }
-    // Keep the library's default certificate verification enabled. Disabling
-    // it would allow a network attacker to spoof the market-data endpoint.
+    nepseClient = client;
     return nepseClient;
   } catch (e) {
     console.error('Failed to create NEPSE client:', e.message);
     return null;
   }
+}
+
+// ─── In-flight request de-duplication ───────────────────────────────────────
+// All browser clients share one upstream call per cache window instead of
+// stampeding the exchange the moment a cache entry expires.
+const inFlight = new Map();
+function deduped(key, run) {
+  const existing = inFlight.get(key);
+  if (existing) return existing;
+  const pending = run().finally(() => inFlight.delete(key));
+  inFlight.set(key, pending);
+  return pending;
 }
 
 // ─── Live NEPSE Data Functions ─────────────────────────────────────────────
@@ -104,19 +123,21 @@ async function fetchNepseIndex() {
   const cached = cache.get(key);
   if (cached) return cached;
 
-  try {
-    const client = await getNepseClient();
-    if (!client) return null;
+  return deduped(key, async () => {
+    try {
+      const client = await getNepseClient();
+      if (!client) return null;
 
-    const data = await client.getNepseIndex();
-    if (data) {
-      cache.set(key, data, 60);
+      const data = await client.getNepseIndex();
+      if (data) {
+        cache.set(key, data, 60);
+      }
+      return data;
+    } catch (e) {
+      console.error('NEPSE index fetch failed:', e.message);
+      return null;
     }
-    return data;
-  } catch (e) {
-    console.error('NEPSE index fetch failed:', e.message);
-    return null;
-  }
+  });
 }
 
 async function fetchTopGainers() {
@@ -124,20 +145,22 @@ async function fetchTopGainers() {
   const cached = cache.get(key);
   if (cached) return cached;
 
-  try {
-    const client = await getNepseClient();
-    if (!client) return null;
+  return deduped(key, async () => {
+    try {
+      const client = await getNepseClient();
+      if (!client) return null;
 
-    // BUG FIX: method is getTopTenGainers() (getTopGainers does not exist)
-    const data = await client.getTopTenGainers();
-    if (data) {
-      cache.set(key, data, 60);
+      // BUG FIX: method is getTopTenGainers() (getTopGainers does not exist)
+      const data = await client.getTopTenGainers();
+      if (data) {
+        cache.set(key, data, 60);
+      }
+      return data;
+    } catch (e) {
+      console.error('Top gainers fetch failed:', e.message);
+      return null;
     }
-    return data;
-  } catch (e) {
-    console.error('Top gainers fetch failed:', e.message);
-    return null;
-  }
+  });
 }
 
 async function fetchTopLosers() {
@@ -145,31 +168,26 @@ async function fetchTopLosers() {
   const cached = cache.get(key);
   if (cached) return cached;
 
-  try {
-    const client = await getNepseClient();
-    if (!client) return null;
+  return deduped(key, async () => {
+    try {
+      const client = await getNepseClient();
+      if (!client) return null;
 
-    // BUG FIX: method is getTopTenLosers() (getTopLosers does not exist)
-    const data = await client.getTopTenLosers();
-    if (data) {
-      cache.set(key, data, 60);
+      // BUG FIX: method is getTopTenLosers() (getTopLosers does not exist)
+      const data = await client.getTopTenLosers();
+      if (data) {
+        cache.set(key, data, 60);
+      }
+      return data;
+    } catch (e) {
+      console.error('Top losers fetch failed:', e.message);
+      return null;
     }
-    return data;
-  } catch (e) {
-    console.error('Top losers fetch failed:', e.message);
-    return null;
-  }
+  });
 }
 
-let liveMarketFetchInFlight = null;
-
 async function fetchLiveMarket() {
-  if (!liveMarketFetchInFlight) {
-    liveMarketFetchInFlight = fetchLiveMarketOnce().finally(() => {
-      liveMarketFetchInFlight = null;
-    });
-  }
-  return liveMarketFetchInFlight;
+  return deduped('live_market', fetchLiveMarketOnce);
 }
 
 async function fetchLiveMarketOnce() {
@@ -233,19 +251,21 @@ async function fetchSectorData() {
   const cached = cache.get(key);
   if (cached) return cached;
 
-  try {
-    const client = await getNepseClient();
-    if (!client) return null;
+  return deduped(key, async () => {
+    try {
+      const client = await getNepseClient();
+      if (!client) return null;
 
-    const data = await client.getNepseSubIndices();
-    if (data) {
-      cache.set(key, data, 120);
+      const data = await client.getNepseSubIndices();
+      if (data) {
+        cache.set(key, data, 120);
+      }
+      return data;
+    } catch (e) {
+      console.error('Sector data fetch failed:', e.message);
+      return null;
     }
-    return data;
-  } catch (e) {
-    console.error('Sector data fetch failed:', e.message);
-    return null;
-  }
+  });
 }
 
 async function fetchStockInfo(symbol) {
@@ -253,20 +273,22 @@ async function fetchStockInfo(symbol) {
   const cached = cache.get(key);
   if (cached) return cached;
 
-  try {
-    const client = await getNepseClient();
-    if (!client) return null;
+  return deduped(key, async () => {
+    try {
+      const client = await getNepseClient();
+      if (!client) return null;
 
-    // BUG FIX: method is getSecurityDetails() (getSecurityDetail was a typo)
-    const data = await client.getSecurityDetails(symbol);
-    if (data) {
-      cache.set(key, data, 300);
+      // BUG FIX: method is getSecurityDetails() (getSecurityDetail was a typo)
+      const data = await client.getSecurityDetails(symbol);
+      if (data) {
+        cache.set(key, data, 300);
+      }
+      return data;
+    } catch (e) {
+      console.error(`Stock info fetch failed for ${symbol}:`, e.message);
+      return null;
     }
-    return data;
-  } catch (e) {
-    console.error(`Stock info fetch failed for ${symbol}:`, e.message);
-    return null;
-  }
+  });
 }
 
 // ─── Helper: Get Nepal Standard Time ────────────────────────────────────────
@@ -279,6 +301,38 @@ function getNPT() {
 }
 
 // ─── API Routes ──────────────────────────────────────────────────────────────
+
+// Serialize the NPT wall time produced by getNPT()'s local getters with the
+// +05:45 offset. npt.toISOString() emits the machine's UTC instant instead,
+// which reports a completely wrong clock whenever the host is not on UTC.
+function toNptIso(npt, hour, minute) {
+  const pad = (n, w = 2) => String(n).padStart(w, '0');
+  return `${npt.getFullYear()}-${pad(npt.getMonth() + 1)}-${pad(npt.getDate())}` +
+    `T${pad(hour)}:${pad(minute)}:${pad(npt.getSeconds())}.${pad(npt.getMilliseconds(), 3)}+05:45`;
+}
+
+// getNepseIndex() returns several indices (Sensitive Float, Float, Sensitive,
+// NEPSE). Select the actual NEPSE index instead of whatever the exchange
+// happens to list first — otherwise the UI renders ~155 instead of ~2570.
+function pickNepseIndex(live) {
+  const entries = Array.isArray(live) ? live
+    : (live && typeof live === 'object' ? [live] : []);
+  if (!entries.length) return null;
+
+  const entry = entries.find(e => e && /^nepse(\s+index)?$/i.test(String(e.index || '').trim()))
+    || entries.find(e => e && /nepse/i.test(String(e.index || '')));
+  if (!entry) return null;
+
+  const value = Number(entry.currentValue);
+  if (!Number.isFinite(value) || value <= 0) return null;
+  const change = Number(entry.change);
+  const pct = Number(entry.perChange);
+  return {
+    value,
+    change: Number.isFinite(change) ? change : 0,
+    pct: Number.isFinite(pct) ? pct : 0
+  };
+}
 
 // Market status & NEPSE index
 app.get('/api/market-status', async (req, res) => {
@@ -303,14 +357,12 @@ app.get('/api/market-status', async (req, res) => {
 
     const payload = {
       status: marketStatus,
-      // npt is represented with local getters for NPT wall time. Preserve the
-      // actual Nepal offset in the serialized timestamp instead of labeling
-      // that wall time as UTC with a trailing Z.
-      nptTime: npt.toISOString().replace(/Z$/, '+05:45'),
+      nptTime: toNptIso(npt, hour, minute),
       nptHour: hour,
       nptMinute: minute,
       dayOfWeek: day,
       live: live || null,
+      nepseIndex: pickNepseIndex(live),
       source: live ? 'live' : 'simulated'
     };
 
@@ -423,15 +475,31 @@ app.get('/api/health', (req, res) => {
   });
 });
 
+// Unknown API paths must answer JSON. Without this they fall through to the
+// SPA catch-all and clients get 200 + HTML when they expect JSON.
+app.use('/api', (req, res) => {
+  res.status(404).json({ success: false, error: 'Not found' });
+});
+
 // ─── Serve index.html for all other routes ────────────────────────────────────
 app.get('*', (req, res) => {
   res.sendFile(path.join(__dirname, 'public', 'index.html'));
 });
 
 const PORT = process.env.PORT || 3000;
-app.listen(PORT, () => {
+const server = app.listen(PORT, () => {
   console.log(`\n🚀 NEPSE AI Analyzer running at http://localhost:${PORT}`);
   console.log(`📊 NEPSE API library: ${Nepse ? 'loaded ✓' : 'unavailable ✗ (using simulated data)'}`);
   console.log('📅 Trading days: Sun–Thu (Nepal calendar)');
   console.log('Press Ctrl+C to stop.\n');
+});
+
+server.on('error', (err) => {
+  if (err.code === 'EADDRINUSE') {
+    console.error(`\n❌ Port ${PORT} is already in use.`);
+    console.error(`   Stop the process using it, or start with a different port:`);
+    console.error(`   PORT=3001 npm start\n`);
+    process.exit(1);
+  }
+  throw err;
 });

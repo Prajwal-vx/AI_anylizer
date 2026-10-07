@@ -62,10 +62,31 @@ check('history: contains Sunday trading dates', hist.some(h => isoDay(h.date) ==
   const ta = sb3.__ta;
   const stock = NEPSE_STOCKS[0];
   const a = ta.analyzeStock(stock);
-  const b = ta.analyzeStock(stock, a.prices, a.volumes);
-  check('analyzeStock: supplied price/volume history is used unchanged (consistency)', 
-    JSON.stringify(a.prices) === JSON.stringify(b.prices) && JSON.stringify(a.volumes) === JSON.stringify(b.volumes));
+  check('analyzeStock: returns priceHistory + volumeHistory',
+    Array.isArray(a.priceHistory) && a.priceHistory.length > 0 &&
+    Array.isArray(a.volumeHistory) && a.volumeHistory.length === a.priceHistory.length);
+
+  // Supplying a fixed series must be echoed back verbatim. The old test read
+  // a.prices / a.volumes (always undefined) and compared undefined === undefined.
+  const fixedPrices = Array.from({ length: 61 }, (_, i) => 100 + i);
+  const fixedVolumes = Array.from({ length: 61 }, (_, i) => 1000 + i * 10);
+  const b = ta.analyzeStock(stock, fixedPrices, fixedVolumes);
+  check('analyzeStock: supplied price/volume history is used unchanged (consistency)',
+    JSON.stringify(b.priceHistory) === JSON.stringify(fixedPrices) &&
+    JSON.stringify(b.volumeHistory) === JSON.stringify(fixedVolumes));
   check('analyzeStock: returns a valid signal', ['BUY', 'SELL', 'HOLD'].includes(a.signal), String(a.signal));
+
+  // buildReasoning used to compare a stringified percentage, so a flat stock
+  // rendered "has gained 0.00%".
+  const flat = ta.analyzeStock({ ...stock, ltp: stock.prevClose });
+  check('flat stock: reasoning says unchanged, not "gained 0.00%"',
+    /is unchanged today/.test(flat.reasoning) && !/gained <strong>0\.00%/.test(flat.reasoning),
+    flat.reasoning.slice(0, 90));
+
+  // charCodeAt(1) on a 1-char symbol is NaN, which used to poison the trend.
+  const oneChar = ta.generatePriceHistory({ symbol: 'A', prevClose: 100, ltp: 105, volume: 1000 }, 30);
+  check('generatePriceHistory: single-character symbol stays finite',
+    oneChar.prices.length === 31 && oneChar.prices.every(Number.isFinite) && oneChar.volumes.every(Number.isFinite));
 }
 
 console.log('== Structure ==');

@@ -136,8 +136,10 @@ const TechnicalAnalysis = (() => {
     const prices = [];
     const volumes = [];
     let price = stock.prevClose * (0.85 + Math.random() * 0.1);
-    const seed = stock.symbol.charCodeAt(0) + stock.symbol.charCodeAt(1);
-    const trend = ((seed % 7) - 3) * 0.002; // slight trend bias per stock
+    // charCodeAt(1) is NaN for single-character symbols, which silently
+    // zeroed the trend bias on those stocks.
+    const seed = stock.symbol.charCodeAt(0) + (stock.symbol.charCodeAt(1) || 0);
+    const trend = (((seed % 7) || 0) - 3) * 0.002; // slight trend bias per stock
 
     for (let i = days; i >= 0; i--) {
       const volatility = stock.ltp * 0.018;
@@ -342,14 +344,24 @@ const TechnicalAnalysis = (() => {
       targetLow,
       targetHigh,
       reasoning,
-      priceHistory: prices
+      priceHistory: prices,
+      volumeHistory: volumes
     };
   }
 
   function buildReasoning(stock, signal, bullish, bearish, rsiVal, macdVal, bb, sr) {
-    const changePct = ((stock.ltp - stock.prevClose) / stock.prevClose * 100).toFixed(2);
+    // changePct must stay a number: it used to be a string, so `"0.00" > 0`
+    // evaluated true and a flat stock was reported as "gained 0.00%".
+    const prevClose = Number(stock.prevClose);
+    const ltp = Number(stock.ltp);
+    const changePct = Number.isFinite(prevClose) && prevClose > 0
+      ? (ltp - prevClose) / prevClose * 100
+      : 0;
     const dirWord = changePct > 0 ? 'gained' : 'declined';
-    let text = `<strong>${stock.symbol}</strong> has ${dirWord} <strong>${Math.abs(changePct)}%</strong> today (LTP: Rs.${stock.ltp}). `;
+    const absPct = Math.abs(changePct).toFixed(2);
+    let text = changePct === 0
+      ? `<strong>${stock.symbol}</strong> is unchanged today (LTP: Rs.${stock.ltp}). `
+      : `<strong>${stock.symbol}</strong> has ${dirWord} <strong>${absPct}%</strong> today (LTP: Rs.${stock.ltp}). `;
 
     if (signal === 'BUY') {
       text += `Technical indicators show a <strong class="green">bullish setup</strong> for the next 3–4 trading days. `;
@@ -389,7 +401,7 @@ const TechnicalAnalysis = (() => {
     const buyCount  = analyses.filter(a => a.result.signal === 'BUY').length;
     const sellCount = analyses.filter(a => a.result.signal === 'SELL').length;
     const holdCount = analyses.filter(a => a.result.signal === 'HOLD').length;
-    const total = analyses.length;
+    const total = analyses.length || 1;
 
     const bullPct = Math.round((buyCount / total) * 100);
     const bearPct = Math.round((sellCount / total) * 100);
@@ -398,7 +410,6 @@ const TechnicalAnalysis = (() => {
     let indexMomentum = 'neutral';
     if (indexHistory && indexHistory.length >= 5) {
       const recent = indexHistory.slice(-5).map(d => d.value);
-      const trend = ema(recent, Math.min(5, recent.length));
       const cur = recent[recent.length - 1];
       const prev = recent[recent.length - 2];
       if (cur > prev * 1.005) indexMomentum = 'bullish';

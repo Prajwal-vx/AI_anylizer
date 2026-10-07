@@ -41,7 +41,7 @@ const State = {
   modalChart: null,
   currentModalStock: null,
   alertCheckInterval: null,
-  lastApiAttempt: 0
+  lastAiRun: 0
 };
 
 // ════════════════════════════════════════════════════════════════════════════
@@ -184,14 +184,7 @@ async function fetchLiveData() {
     try {
       const res = await fetch('/api/market-status');
       const data = await res.json();
-      if (data.success && data.data.live) {
-        const live = data.data.live;
-        if (live.nepseIndex !== undefined) {
-          updateNepseIndex(live.nepseIndex, live.change || 0);
-        } else if (Array.isArray(live) && live[0]) {
-          updateNepseIndex(live[0].currentValue || live[0].index, live[0].change || 0);
-        }
-      }
+      if (data.success && data.data) applyMarketStatus(data.data);
     } catch (e) {
       // Keep the latest displayed index when the upstream feed is unreachable.
     }
@@ -265,13 +258,34 @@ function mergeWithLiveData(liveData) {
   });
 }
 
-function updateNepseIndex(value, change) {
+/**
+ * Push the NEPSE index into State from the /api/market-status payload.
+ * The exchange returns several indices (Sensitive Float, Float, Sensitive,
+ * NEPSE), so blindly reading the first entry renders ~155 instead of ~2570.
+ */
+function applyMarketStatus(payload) {
+  const normalized = payload.nepseIndex;
+  if (normalized && updateNepseIndex(normalized.value, normalized.change, normalized.pct)) return;
+
+  const live = payload.live;
+  const entries = Array.isArray(live) ? live : (live ? [live] : []);
+  const entry = entries.find(e => e && /^nepse(\s+index)?$/i.test(String(e.index || '').trim()))
+    || entries.find(e => e && /nepse/i.test(String(e.index || '')));
+  if (entry) updateNepseIndex(entry.currentValue, entry.change, entry.perChange);
+}
+
+function updateNepseIndex(value, change, pct) {
   value = Number(value);
   change = Number(change);
-  if (!Number.isFinite(value) || value <= 0 || !Number.isFinite(change)) return;
-  const pct = value > 0 ? (change / (value - change) * 100) : 0;
-  State.nepseIndex = { value, change, pct };
+  if (!Number.isFinite(value) || value <= 0 || !Number.isFinite(change)) return false;
+  let computed = Number(pct);
+  if (!Number.isFinite(computed)) {
+    const base = value - change;
+    computed = base > 0 ? (change / base * 100) : 0;
+  }
+  State.nepseIndex = { value, change, pct: computed };
   renderNepseIndex();
+  return true;
 }
 
 // ════════════════════════════════════════════════════════════════════════════
@@ -343,6 +357,14 @@ function updateTableRows() {
 // CHARTS
 // ════════════════════════════════════════════════════════════════════════════
 function initNepseChart() {
+  // Chart.js is loaded from a CDN; when it is blocked/offline the rest of the
+  // app must still work instead of throwing and aborting init().
+  if (typeof Chart === 'undefined') {
+    const wrap = document.querySelector('#tab-dashboard .chart-wrap');
+    if (wrap) wrap.innerHTML = '<div class="empty-state">Chart library unavailable (offline CDN) — index chart disabled.</div>';
+    document.querySelectorAll('.range-btn').forEach(b => { b.disabled = true; b.style.opacity = '0.4'; b.style.cursor = 'default'; });
+    return;
+  }
   const ctx = document.getElementById('nepseChart').getContext('2d');
   const data = getChartData(State.chartRange);
 
@@ -416,6 +438,7 @@ function setChartRange(days, btn) {
   document.querySelectorAll('.range-btn').forEach(b => b.classList.remove('active'));
   btn.classList.add('active');
 
+  if (!State.nepseChart) return;
   const data = getChartData(days);
   State.nepseChart.data.labels = data.map(d => d.date);
   State.nepseChart.data.datasets[0].data = data.map(d => d.value);
@@ -423,7 +446,13 @@ function setChartRange(days, btn) {
 }
 
 function initModalChart(prices, symbol) {
-  const ctx = document.getElementById('modalChart').getContext('2d');
+  const canvas = document.getElementById('modalChart');
+  if (typeof Chart === 'undefined') {
+    const wrap = canvas && canvas.parentElement;
+    if (wrap) wrap.innerHTML = '<div class="empty-state">Chart library unavailable (offline CDN).</div>';
+    return;
+  }
+  const ctx = canvas.getContext('2d');
   if (State.modalChart) State.modalChart.destroy();
 
   const last30 = prices.slice(-30);
@@ -757,14 +786,19 @@ function openStockModal(symbol) {
   // Chart
   setTimeout(() => initModalChart(prices, symbol), 50);
 
-  // Indicators panel
+  // Indicators panel. Guard every comparison: with a missing indicator the
+  // old `null < 30` style checks silently classified "no data" as bullish.
+  const rsiVal = result.rsi;
+  const macdVal = result.macd;
+  const bbVal = result.bollingerBands;
+  const isNum = v => typeof v === 'number' && Number.isFinite(v);
   const inds = [
-    { label: 'RSI (14)', value: result.rsi?.toFixed(1) || '--', signal: result.rsi < 30 ? 'Oversold ↗' : result.rsi > 70 ? 'Overbought ↘' : 'Neutral', bias: result.rsi < 30 ? 'bullish' : result.rsi > 70 ? 'bearish' : 'neutral' },
-    { label: 'MACD', value: result.macd?.macd?.toFixed(2) || '--', signal: result.macd?.crossover === 'bullish' ? 'Bull Cross ↗' : result.macd?.crossover === 'bearish' ? 'Bear Cross ↘' : result.macd?.histogram > 0 ? 'Positive' : 'Negative', bias: result.macd?.histogram > 0 ? 'bullish' : 'bearish' },
-    { label: 'EMA 9', value: result.ema9?.toFixed(2) || '--', signal: result.ema9 > result.ema21 ? 'Above EMA 21 ↗' : 'Below EMA 21 ↘', bias: result.ema9 > result.ema21 ? 'bullish' : 'bearish' },
-    { label: 'EMA 21', value: result.ema21?.toFixed(2) || '--', signal: stock.ltp > result.ema21 ? 'Price above' : 'Price below', bias: stock.ltp > result.ema21 ? 'bullish' : 'bearish' },
-    { label: 'EMA 50', value: result.ema50?.toFixed(2) || '--', signal: stock.ltp > result.ema50 ? 'Uptrend' : 'Downtrend', bias: stock.ltp > result.ema50 ? 'bullish' : 'bearish' },
-    { label: 'BB %B', value: result.bollingerBands ? result.bollingerBands.pctB + '%' : '--', signal: result.bollingerBands?.pctB < 20 ? 'Near Lower Band' : result.bollingerBands?.pctB > 80 ? 'Near Upper Band' : 'Mid-band', bias: result.bollingerBands?.pctB < 30 ? 'bullish' : result.bollingerBands?.pctB > 70 ? 'bearish' : 'neutral' },
+    { label: 'RSI (14)', value: isNum(rsiVal) ? rsiVal.toFixed(1) : '--', signal: !isNum(rsiVal) ? 'No data' : rsiVal < 30 ? 'Oversold ↗' : rsiVal > 70 ? 'Overbought ↘' : 'Neutral', bias: !isNum(rsiVal) ? 'neutral' : rsiVal < 30 ? 'bullish' : rsiVal > 70 ? 'bearish' : 'neutral' },
+    { label: 'MACD', value: macdVal && isNum(macdVal.macd) ? macdVal.macd.toFixed(2) : '--', signal: !macdVal ? 'No data' : macdVal.crossover === 'bullish' ? 'Bull Cross ↗' : macdVal.crossover === 'bearish' ? 'Bear Cross ↘' : macdVal.histogram > 0 ? 'Positive' : 'Negative', bias: !macdVal ? 'neutral' : macdVal.histogram > 0 ? 'bullish' : 'bearish' },
+    { label: 'EMA 9', value: isNum(result.ema9) ? result.ema9.toFixed(2) : '--', signal: !isNum(result.ema9) || !isNum(result.ema21) ? 'No data' : result.ema9 > result.ema21 ? 'Above EMA 21 ↗' : 'Below EMA 21 ↘', bias: !isNum(result.ema9) || !isNum(result.ema21) ? 'neutral' : result.ema9 > result.ema21 ? 'bullish' : 'bearish' },
+    { label: 'EMA 21', value: isNum(result.ema21) ? result.ema21.toFixed(2) : '--', signal: !isNum(result.ema21) ? 'No data' : stock.ltp > result.ema21 ? 'Price above' : 'Price below', bias: !isNum(result.ema21) ? 'neutral' : stock.ltp > result.ema21 ? 'bullish' : 'bearish' },
+    { label: 'EMA 50', value: isNum(result.ema50) ? result.ema50.toFixed(2) : '--', signal: !isNum(result.ema50) ? 'No data' : stock.ltp > result.ema50 ? 'Uptrend' : 'Downtrend', bias: !isNum(result.ema50) ? 'neutral' : stock.ltp > result.ema50 ? 'bullish' : 'bearish' },
+    { label: 'BB %B', value: bbVal ? bbVal.pctB + '%' : '--', signal: !bbVal ? 'No data' : bbVal.pctB < 20 ? 'Near Lower Band' : bbVal.pctB > 80 ? 'Near Upper Band' : 'Mid-band', bias: !bbVal ? 'neutral' : bbVal.pctB < 30 ? 'bullish' : bbVal.pctB > 70 ? 'bearish' : 'neutral' },
     { label: 'Support', value: `Rs.${result.support}`, signal: `Floor level`, bias: 'neutral' },
     { label: 'Resistance', value: `Rs.${result.resistance}`, signal: `Ceiling level`, bias: 'neutral' },
   ];
@@ -810,6 +844,18 @@ function closeStockModal() {
 function closeModal(e) {
   if (e.target === document.getElementById('modal-overlay')) closeStockModal();
 }
+
+// Escape mirrors the ✕ button, then dismisses an open search dropdown.
+document.addEventListener('keydown', (e) => {
+  if (e.key !== 'Escape') return;
+  const overlay = document.getElementById('modal-overlay');
+  if (overlay && overlay.classList.contains('show')) {
+    closeStockModal();
+    return;
+  }
+  const results = document.getElementById('search-results');
+  if (results && results.classList.contains('show')) results.classList.remove('show');
+});
 
 // ════════════════════════════════════════════════════════════════════════════
 // SEARCH
@@ -964,63 +1010,74 @@ function formatCurrency(n) {
 // ════════════════════════════════════════════════════════════════════════════
 // INITIALIZE
 // ════════════════════════════════════════════════════════════════════════════
-async function init() {
-  // Set initial NEPSE index from history
-  const lastEntry = State.indexHistory[State.indexHistory.length - 1];
-  const prevEntry = State.indexHistory[State.indexHistory.length - 2];
-  if (lastEntry && prevEntry) {
-    const change = lastEntry.value - prevEntry.value;
-    const pct = (change / prevEntry.value) * 100;
-    State.nepseIndex = { value: lastEntry.value, change, pct };
-  }
+const AI_REFRESH_MS = 5 * 60 * 1000;
 
-  // Compute stock changes based on seed data
-  State.stocks.forEach(stock => {
-    stock.change = stock.ltp - stock.prevClose;
-    stock.changePct = (stock.change / stock.prevClose) * 100;
-  });
-
-  renderNepseIndex();
-  renderSectorHeatmap();
-  renderTopMovers();
-
-  // Run AI analysis on all stocks
+function runStockAnalyses() {
   State.analyses = State.stocks.map(stock => ({
     stock,
     result: TechnicalAnalysis.analyzeStock(stock)
   }));
-
+  State.lastAiRun = Date.now();
   renderStockTable();
   renderPredictionsGrid();
-  renderAlerts();
-  initNepseChart();
+}
 
-  // Start clock
-  tickClock();
-  setInterval(tickClock, 1000);
-
-  // Fetch live data
-  await fetchLiveData();
-
-  // Poll the exchange-backed API every five seconds. The server shares each
-  // upstream result across clients for the same five-second cache window.
-  setInterval(async () => {
-    await fetchLiveData();
-    // Re-run AI every 5 minutes
-    if (Date.now() % 300000 < 65000) {
-      State.analyses = State.stocks.map(stock => ({
-        stock,
-        result: TechnicalAnalysis.analyzeStock(stock)
-      }));
-      renderStockTable();
-      renderPredictionsGrid();
-    }
-  }, 5000);
-
-  // Hide loading overlay
+async function init() {
+  // Dismiss the loader first so a later init failure can never leave the
+  // page stuck behind a permanent overlay.
   setTimeout(() => {
-    document.getElementById('loading-overlay').classList.add('hidden');
+    const overlay = document.getElementById('loading-overlay');
+    if (overlay) overlay.classList.add('hidden');
   }, 1200);
+
+  try {
+    // Set initial NEPSE index from history
+    const lastEntry = State.indexHistory[State.indexHistory.length - 1];
+    const prevEntry = State.indexHistory[State.indexHistory.length - 2];
+    if (lastEntry && prevEntry) {
+      const change = lastEntry.value - prevEntry.value;
+      const pct = (change / prevEntry.value) * 100;
+      State.nepseIndex = { value: lastEntry.value, change, pct };
+    }
+
+    // Compute stock changes based on seed data
+    State.stocks.forEach(stock => {
+      stock.change = stock.ltp - stock.prevClose;
+      stock.changePct = (stock.change / stock.prevClose) * 100;
+    });
+
+    renderNepseIndex();
+    renderSectorHeatmap();
+    renderTopMovers();
+
+    // Run AI analysis on all stocks
+    runStockAnalyses();
+
+    renderAlerts();
+    initNepseChart();
+
+    const screenerTitle = document.querySelector('#tab-stocks .card-title');
+    if (screenerTitle) screenerTitle.textContent = `Stock Screener — Top ${State.stocks.length} NEPSE Stocks`;
+
+    // Start clock
+    tickClock();
+    setInterval(tickClock, 1000);
+
+    // Fetch live data
+    await fetchLiveData();
+
+    // Poll the exchange-backed API every five seconds. The server shares each
+    // upstream result across clients for the same five-second cache window.
+    setInterval(async () => {
+      await fetchLiveData();
+      // Re-run AI at most once every 5 minutes. The previous
+      // `Date.now() % 300000 < 65000` check matched ~13 consecutive polls
+      // and rebuilt every table/grid on each of them.
+      if (Date.now() - State.lastAiRun >= AI_REFRESH_MS) runStockAnalyses();
+    }, 5000);
+  } catch (e) {
+    console.error('Initialization failed:', e);
+  }
 }
 
 // Start when DOM ready
